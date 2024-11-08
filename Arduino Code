@@ -1,0 +1,139 @@
+#include <Wire.h>
+#include <SI470X.h>
+
+#define RESET_PIN 2 // Define the reset pin
+
+SI470X rx; // Instantiate the SI470X object
+
+unsigned long rds_elapsed = millis();
+unsigned long lastSignalUpdate = 0;
+const unsigned long SIGNAL_UPDATE_DELAY = 3000;
+const unsigned long MAX_DELAY_RDS = 25;
+
+int currentFrequency;
+int lastSignalStrength = -1;
+String lastStationName = "";
+bool isMuted = true;
+bool frequencySet = false; // Track if a frequency has been set
+bool dataSendingEnabled = true; // Control sending of data updates
+
+// Variable to track the last time Station Name was printed
+unsigned long lastDisplayTime = 0;
+const unsigned long DISPLAY_INTERVAL = 2000; // Interval for data display
+
+void setup() {
+  delay(1000); // Delay to allow Serial Monitor to sync
+  Serial.begin(9600);
+
+  while (Serial.available()) {
+    Serial.read();
+  }
+
+  rx.setup(RESET_PIN, A4); // Setup for Si4703 with reset and SDA pins
+  rx.setRDS(true); // Enable RDS
+
+  rx.setVolume(0); // Mute initially
+  rx.setMute(true); // Mute audio until frequency is set
+
+  Serial.println("Enter frequency in MHz (e.g., 101.1) to tune:");
+}
+
+void displayFrequency() {
+  if (!dataSendingEnabled) return; // Check if data sending is enabled
+  float frequencyInMHz = currentFrequency / 100.0;
+  Serial.print("Frequency: ");
+  Serial.print(frequencyInMHz, 1);
+  Serial.println(" MHz");
+}
+
+void displaySignalStrength() {
+  if (!dataSendingEnabled) return; // Check if data sending is enabled
+  int rawSignalStrength = rx.getRssi();
+  int signalStrength = map(rawSignalStrength, 0, 75, 0, 100);
+
+  if (abs(signalStrength - lastSignalStrength) >= 2 && (millis() - lastSignalUpdate >= SIGNAL_UPDATE_DELAY)) {
+    lastSignalStrength = signalStrength;
+    lastSignalUpdate = millis();
+    Serial.print("Signal:");
+    Serial.println(signalStrength);
+  }
+}
+
+void checkRDS() {
+  if (rx.getRdsReady()) {
+    // Process Station Name
+    String stationName = rx.getRdsStationName();
+    if (stationName.length() > 0 && stationName != lastStationName) {
+      lastStationName = stationName;
+    }
+  }
+}
+
+void processSerialInput() {
+  if (Serial.available() > 0) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    // Check for MUTE command
+    if (input == "MUTE") {
+      rx.setMute(true); // Mute the audio
+      isMuted = true;
+      dataSendingEnabled = false; // Disable data sending
+      Serial.println("Audio muted and data sending paused.");
+    }
+    // Check for UNMUTE command
+    else if (input == "UNMUTE") {
+      if (frequencySet) { // Only unmute if a valid frequency is set
+        rx.setMute(false); // Unmute the audio
+        rx.setVolume(15); // Set to a default volume level
+        isMuted = false;
+        dataSendingEnabled = true; // Enable data sending
+        Serial.println("Audio unmuted and data sending resumed.");
+      } else {
+        Serial.println("Cannot unmute, frequency not set.");
+      }
+    }
+    // Check for frequency input
+    else if (input.length() > 0 && input.indexOf('.') != -1) {
+      float frequency = input.toFloat();
+
+      if (frequency >= 87.5 && frequency <= 108.0) {
+        currentFrequency = static_cast<int>(frequency * 100);
+        rx.setFrequency(currentFrequency);
+        rx.setMute(false);
+        rx.setVolume(15);
+        frequencySet = true;
+        displayFrequency();
+        isMuted = false;
+        dataSendingEnabled = true; // Enable data sending
+        Serial.println("Frequency set and audio unmuted.");
+      } else {
+        Serial.println("Invalid frequency. Please enter a value between 87.5 and 108.0 MHz.");
+      }
+    } else {
+      Serial.println("Unrecognized command. Please check input.");
+    }
+  }
+}
+
+void loop() {
+  if (!isMuted && dataSendingEnabled) {
+    if (millis() - rds_elapsed >= MAX_DELAY_RDS) {
+      checkRDS();
+      rds_elapsed = millis();
+    }
+
+    displaySignalStrength();
+  }
+
+  processSerialInput();
+
+  // Periodically display Station Name every interval if data sending is enabled
+  if (!isMuted && dataSendingEnabled && (millis() - lastDisplayTime >= DISPLAY_INTERVAL)) {
+    lastDisplayTime = millis(); // Update the last display time
+    if (lastStationName.length() > 0) {
+      Serial.print("Station Name: ");
+      Serial.println(lastStationName);
+    }
+  }
+}
